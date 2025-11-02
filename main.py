@@ -1,17 +1,16 @@
-from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi import FastAPI, Query
+from fastapi.responses import HTMLResponse, RedirectResponse
 import httpx
 import time
+import os
 
 app = FastAPI()
 
-# Память для одноразового использования кодов (кратковременно)
 USED_CODES = {}
 CODE_TTL_SEC = 300  # 5 минут
 
 def is_code_used(code: str) -> bool:
     now = time.time()
-    # Почистим старые записи
     for c, ts in list(USED_CODES.items()):
         if now - ts > CODE_TTL_SEC:
             USED_CODES.pop(c, None)
@@ -29,16 +28,8 @@ async def poster_callback(
     code: str = Query(..., description="Authorization code от Poster"),
     account: str = Query(None, description="Аккаунт Poster")
 ):
-    # Защитимся от повторного обмена того же кода (перезагрузка страницы и т.п.)
     if is_code_used(code):
-        # Уже обменивали — показываем понятный ответ без повторного вызова к Poster
-        return JSONResponse(
-            {
-                "message": "Код уже был использован. Обновите токен через новую авторизацию.",
-                "account": account
-            },
-            status_code=200
-        )
+        return RedirectResponse(url="/fail?reason=used")
 
     url = "https://joinposter.com/api/auth/access_token"
     data = {
@@ -53,35 +44,42 @@ async def poster_callback(
         r = await client.post(url, data=data)
         token_data = r.json()
 
-    # Помечаем код как использованный в любом случае: Poster принимает код только один раз
     mark_code_used(code)
 
-    # Успех: есть access_token
     if isinstance(token_data, dict) and token_data.get("access_token"):
-        # Тут можно сохранить токен в БД/хранилище. Для простоты — возвращаем и редиректим.
-        # Редирект на /docs (можешь заменить на свою страницу Wix/меню)
-        return JSONResponse(
-            {
-                "message": "Авторизация успешна",
-                "account": account,
-                "token": {
-                    "access_token": token_data["access_token"],
-                    "expires_in": token_data.get("expires_in"),
-                    "token_type": token_data.get("token_type")
-                }
-            },
-            status_code=200
-        )
+        # Логируем токен (виден в Render → Logs)
+        print("Получен токен:", token_data)
 
-    # Ошибка Poster (например, Invalid authorization code)
-    return JSONResponse(
-        {
-            "message": "Авторизация не удалась",
-            "account": account,
-            "poster_error": token_data
-        },
-        status_code=400
-    )
+        # Можно сохранить токен в переменные окружения
+        os.environ["POSTER_TOKEN"] = token_data["access_token"]
+
+        return RedirectResponse(url="/success")
+    else:
+        print("Ошибка авторизации Poster:", token_data)
+        return RedirectResponse(url="/fail?reason=poster_error")
+
+@app.get("/success", response_class=HTMLResponse)
+async def success_page():
+    return """
+    <html>
+      <body style="font-family: sans-serif; text-align: center; margin-top: 50px;">
+        <h2>✅ Авторизация успешна</h2>
+        <p>Токен сохранён на сервере. Можно закрыть это окно.</p>
+      </body>
+    </html>
+    """
+
+@app.get("/fail", response_class=HTMLResponse)
+async def fail_page(reason: str = "unknown"):
+    return f"""
+    <html>
+      <body style="font-family: sans-serif; text-align: center; margin-top: 50px;">
+        <h2>❌ Авторизация не удалась</h2>
+        <p>Причина: {reason}</p>
+        <p>Попробуйте пройти авторизацию ещё раз.</p>
+      </body>
+    </html>
+    """
 
 @app.get("/menu/bar.json")
 async def bar_menu():
