@@ -1,36 +1,88 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Query, HTTPException
+from fastapi.responses import JSONResponse, RedirectResponse
 import httpx
+import time
 
 app = FastAPI()
 
-# Заглушка для корня
+# Память для одноразового использования кодов (кратковременно)
+USED_CODES = {}
+CODE_TTL_SEC = 300  # 5 минут
+
+def is_code_used(code: str) -> bool:
+    now = time.time()
+    # Почистим старые записи
+    for c, ts in list(USED_CODES.items()):
+        if now - ts > CODE_TTL_SEC:
+            USED_CODES.pop(c, None)
+    return code in USED_CODES
+
+def mark_code_used(code: str):
+    USED_CODES[code] = time.time()
+
 @app.get("/")
 async def root():
     return {"message": "Service is running. Use /docs for API documentation."}
 
-# Callback от Poster
 @app.get("/menu-on-tv")
-async def poster_callback(code: str, account: str = None):
+async def poster_callback(
+    code: str = Query(..., description="Authorization code от Poster"),
+    account: str = Query(None, description="Аккаунт Poster")
+):
+    # Защитимся от повторного обмена того же кода (перезагрузка страницы и т.п.)
+    if is_code_used(code):
+        # Уже обменивали — показываем понятный ответ без повторного вызова к Poster
+        return JSONResponse(
+            {
+                "message": "Код уже был использован. Обновите токен через новую авторизацию.",
+                "account": account
+            },
+            status_code=200
+        )
+
     url = "https://joinposter.com/api/auth/access_token"
     data = {
         "application_id": "4394",
         "application_secret": "eb7286874ae3e6c82d2d688711cb4950",
         "grant_type": "authorization_code",
         "code": code,
-        "redirect_uri": "https://menu-on-tv.onrender.com/menu-on-tv"  # должно совпадать с настройками Poster
+        "redirect_uri": "https://menu-on-tv.onrender.com/menu-on-tv",
     }
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=10) as client:
         r = await client.post(url, data=data)
         token_data = r.json()
 
-    return {
-        "message": "Авторизация успешна",
-        "account": account,
-        "token": token_data
-    }
+    # Помечаем код как использованный в любом случае: Poster принимает код только один раз
+    mark_code_used(code)
 
-# Заготовки для меню
+    # Успех: есть access_token
+    if isinstance(token_data, dict) and token_data.get("access_token"):
+        # Тут можно сохранить токен в БД/хранилище. Для простоты — возвращаем и редиректим.
+        # Редирект на /docs (можешь заменить на свою страницу Wix/меню)
+        return JSONResponse(
+            {
+                "message": "Авторизация успешна",
+                "account": account,
+                "token": {
+                    "access_token": token_data["access_token"],
+                    "expires_in": token_data.get("expires_in"),
+                    "token_type": token_data.get("token_type")
+                }
+            },
+            status_code=200
+        )
+
+    # Ошибка Poster (например, Invalid authorization code)
+    return JSONResponse(
+        {
+            "message": "Авторизация не удалась",
+            "account": account,
+            "poster_error": token_data
+        },
+        status_code=400
+    )
+
 @app.get("/menu/bar.json")
 async def bar_menu():
     return {"items": [], "note": "Здесь будет меню бара"}
