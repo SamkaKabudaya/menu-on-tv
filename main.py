@@ -18,3 +18,4 @@ async def poster_callback(code: str, account: str = None):
         token_data = r.json()
 
     return {"message": "Авторизация успешна", "token": token_data}
+
